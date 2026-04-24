@@ -1,8 +1,10 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
+import requests
+from bs4 import BeautifulSoup
 
-st.title("Stock Screener Pro (Multi-Stock)")
+st.title("Ultimate Stock Screener (All-in-One)")
 
 stocks_input = st.text_area(
     "Enter stocks (comma separated, e.g. TCS.NS, INFY.NS, RELIANCE.NS)"
@@ -14,30 +16,60 @@ def to_crore(x):
     except:
         return None
 
+# 🔹 Screener Data Function
+def get_screener_data(stock_name):
+    try:
+        url = f"https://www.screener.in/company/{stock_name}/"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        r = requests.get(url, headers=headers)
+        soup = BeautifulSoup(r.text, "html.parser")
+
+        ratios = {}
+
+        for li in soup.select("ul#top-ratios li"):
+            name = li.select_one("span.name").text.strip()
+            value = li.select_one("span.number").text.strip()
+            ratios[name] = value
+
+        return {
+            "ROCE": ratios.get("Return on capital employed"),
+            "ROE": ratios.get("Return on equity"),
+            "PE_alt": ratios.get("P/E"),
+            "Dividend_alt": ratios.get("Dividend Yield"),
+        }
+    except:
+        return {}
+
 if stocks_input:
     stocks = [s.strip() for s in stocks_input.split(",")]
 
-    data_list = []
+    results = []
 
-    for stock in stocks:
+    for i, stock in enumerate(stocks, start=1):
         try:
             ticker = yf.Ticker(stock)
             info = ticker.info
             hist = ticker.history(period="5y")
+
+            screener = get_screener_data(stock.replace(".NS",""))
 
             price = info.get("currentPrice")
             market_cap = info.get("marketCap")
             pe = info.get("trailingPE")
             div_yield = info.get("dividendYield")
 
-            ath = hist["Close"].max() if not hist.empty else None
+            # ATH price
+            ath_price = hist["Close"].max() if not hist.empty else None
 
+            # ATH market cap
+            ath_mc = None
+            if ath_price and price and market_cap:
+                ath_mc = (ath_price / price) * market_cap
+
+            # Correction %
             correction = None
-            if price and ath:
-                correction = round(((ath - price) / ath) * 100, 2)
-
-            roe = info.get("returnOnEquity")
-            debt = info.get("totalDebt")
+            if ath_price and price:
+                correction = round(((ath_price - price) / ath_price) * 100, 2)
 
             # FCF
             fcf = None
@@ -50,24 +82,39 @@ if stocks_input:
             except:
                 pass
 
-            data_list.append({
+            # Margins
+            margin = info.get("profitMargins")
+
+            # Basic Decision Logic
+            decision = "HOLD"
+            if correction and correction > 30 and fcf_yield and fcf_yield > 5:
+                decision = "BUY"
+            elif correction and correction < 10:
+                decision = "SELL"
+
+            results.append({
+                "S.No": i,
                 "Stock": stock,
                 "Price": price,
                 "MC (₹ Cr)": to_crore(market_cap),
-                "PE": pe,
-                "Div Yield %": round(div_yield*100,2) if div_yield else None,
-                "ATH": ath,
+                "ATH Price": ath_price,
+                "ATH MC (₹ Cr)": to_crore(ath_mc),
                 "Correction %": correction,
-                "ROE": roe,
-                "Debt (₹ Cr)": to_crore(debt),
                 "FCF (₹ Cr)": to_crore(fcf),
-                "FCF Yield %": fcf_yield
+                "FCF Yield %": fcf_yield,
+                "PE (Yahoo)": pe,
+                "PE (Screener)": screener.get("PE_alt"),
+                "ROCE": screener.get("ROCE"),
+                "ROE": screener.get("ROE"),
+                "Margins": margin,
+                "Dividend %": round(div_yield*100,2) if div_yield else screener.get("Dividend_alt"),
+                "Decision": decision
             })
 
         except:
             pass
 
-    df = pd.DataFrame(data_list)
+    df = pd.DataFrame(results)
 
     st.subheader("📊 Screener Output")
-    st.dataframe(df.sort_values(by="Correction %", ascending=False))
+    st.dataframe(df)
