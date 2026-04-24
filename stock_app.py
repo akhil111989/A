@@ -1,122 +1,177 @@
 import streamlit as st
-import yfinance as yf
 import pandas as pd
 import numpy as np
+import yfinance as yf
+import requests
+from bs4 import BeautifulSoup
 
 st.set_page_config(layout="wide")
+st.title("🚀 FULL INVESTING SYSTEM")
 
-st.title("📊 Stock Screener - Institution Style")
-
-# =========================
-# INPUT
-# =========================
+# ================= INPUT =================
 stocks = st.text_input(
-    "Enter Stock Symbols (comma separated, NSE format e.g. TCS.NS, INFY.NS):",
-    "TCS.NS,INFY.NS,HDFCBANK.NS,RELIANCE.NS,ITC.NS"
+    "Enter Stocks (e.g. TCS, INFY, ITC):",
+    "TCS,INFY,HDFCBANK,RELIANCE,ITC"
 )
 
-stock_list = [s.strip() for s in stocks.split(",")]
+stock_list = [s.strip().upper() for s in stocks.split(",")]
 
-# =========================
-# FUNCTIONS
-# =========================
-def get_data(symbol):
+# ================= SCREENER =================
+def get_screener(symbol):
     try:
-        stock = yf.Ticker(symbol)
+        url = f"https://www.screener.in/company/{symbol}/"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        r = requests.get(url, headers=headers)
+        soup = BeautifulSoup(r.text, "html.parser")
 
-        info = stock.info
+        ratios = {}
+        for li in soup.select("li.flex.flex-space-between"):
+            key = li.select_one("span.name").text.strip()
+            val = li.select_one("span.number").text.strip()
+            ratios[key] = val
+
+        return {
+            "PE": float(ratios.get("Stock P/E", "nan").replace(",", "")),
+            "ROCE": float(ratios.get("ROCE", "nan").replace("%", "")),
+            "Dividend": float(ratios.get("Dividend Yield", "0").replace("%", "")),
+        }
+    except:
+        return {}
+
+# ================= MAIN =================
+def analyze(symbol):
+    try:
+        yf_symbol = symbol + ".NS"
+        stock = yf.Ticker(yf_symbol)
+
         hist = stock.history(period="5y")
+        info = stock.info
+        cf = stock.cashflow
+        fin = stock.financials
 
         if hist.empty:
             return None
 
-        current_price = hist["Close"].iloc[-1]
-        ath_price = hist["Close"].max()
+        price = hist["Close"].iloc[-1]
+        ath = hist["Close"].max()
+        correction = ((price - ath) / ath) * 100
 
-        market_cap = info.get("marketCap", np.nan)
         shares = info.get("sharesOutstanding", np.nan)
+        mcap = price * shares if shares else np.nan
+        ath_mcap = ath * shares if shares else np.nan
 
-        # fallback if market cap missing
-        if pd.isna(market_cap) and not pd.isna(shares):
-            market_cap = current_price * shares
+        # FCF
+        try:
+            fcf = cf.loc["Total Cash From Operating Activities"][0] - cf.loc["Capital Expenditures"][0]
+        except:
+            fcf = np.nan
 
-        ath_mcap = ath_price * shares if not pd.isna(shares) else np.nan
+        fcf_yield = (fcf / mcap * 100) if mcap and fcf else np.nan
 
-        correction = ((current_price - ath_price) / ath_price) * 100
+        # Screener data
+        sc = get_screener(symbol)
+        pe = sc.get("PE", np.nan)
+        roce = sc.get("ROCE", np.nan)
+        dividend = sc.get("Dividend", np.nan)
 
-        fcf = info.get("freeCashflow", np.nan)
-        fcf_yield = (fcf / market_cap * 100) if market_cap and fcf else np.nan
-
-        pe = info.get("trailingPE", np.nan)
-
-        roe = info.get("returnOnEquity", np.nan)
-        roce = roe * 100 if roe else np.nan  # proxy
-
-        margins = info.get("profitMargins", np.nan)
-        margins = margins * 100 if margins else np.nan
-
+        # Growth
         growth = info.get("earningsGrowth", np.nan)
         growth = growth * 100 if growth else np.nan
 
-        dividend = info.get("dividendYield", np.nan)
-        dividend = dividend * 100 if dividend else np.nan
+        # Debt
+        debt = info.get("totalDebt", np.nan)
+        debt = debt / 1e7 if debt else np.nan
 
-        # Dummy placeholders (Yahoo doesn't give properly)
-        ath_pe = pe
-        avg_pe = pe
+        # Score Engine
+        score = 0
+        if correction < -25: score += 2
+        if fcf_yield and fcf_yield > 3: score += 2
+        if roce and roce > 18: score += 2
+        if growth and growth > 10: score += 1
+        if debt and debt < (mcap/1e7)*0.5: score += 1
 
-        # Decision logic (basic)
-        decision = "HOLD"
-        if correction < -30 and fcf_yield and fcf_yield > 3:
+        if score >= 6:
+            decision = "STRONG BUY"
+        elif score >= 4:
             decision = "BUY"
-        elif correction > -5:
+        elif score >= 2:
+            decision = "HOLD"
+        else:
             decision = "SELL"
 
         return {
             "Stock": symbol,
-            "Market Cap (Cr)": market_cap / 1e7 if market_cap else np.nan,
-            "Price": current_price,
-            "ATH Price": ath_price,
-            "ATH MCap (Cr)": ath_mcap / 1e7 if ath_mcap else np.nan,
+            "Price": price,
+            "MCap (Cr)": mcap/1e7 if mcap else np.nan,
+            "ATH": ath,
             "Correction %": correction,
-            "FCF (Cr)": fcf / 1e7 if fcf else np.nan,
             "FCF Yield %": fcf_yield,
             "PE": pe,
-            "ATH PE": ath_pe,
-            "5Y Avg PE": avg_pe,
             "ROCE %": roce,
-            "Margins %": margins,
-            "Profit Growth %": growth,
-            "Dividend Yield %": dividend,
+            "Growth %": growth,
+            "Dividend %": dividend,
+            "Debt (Cr)": debt,
+            "Score": score,
             "Decision": decision
         }
 
     except:
         return None
 
-# =========================
-# DATA FETCH
-# =========================
+# ================= RUN =================
 data = []
 
-with st.spinner("Fetching data..."):
+with st.spinner("Analyzing stocks..."):
     for s in stock_list:
-        d = get_data(s)
+        d = analyze(s)
         if d:
             data.append(d)
 
 df = pd.DataFrame(data)
 
-# =========================
-# CLEAN + FORMAT
-# =========================
+# ================= OUTPUT =================
 if not df.empty:
 
-    df.insert(0, "S.No", range(1, len(df) + 1))
-
     df = df.round(1)
+    df = df.sort_values(by="Score", ascending=False)
 
+    st.subheader("📊 Ranked Stocks")
     st.dataframe(df, use_container_width=True)
 
+    # ================= PORTFOLIO =================
+    st.subheader("💼 Portfolio Tracker")
+
+    portfolio = st.text_input(
+        "Enter your holdings (e.g. TCS:100, INFY:50)"
+    )
+
+    if portfolio:
+        total = 0
+        for item in portfolio.split(","):
+            try:
+                name, qty = item.split(":")
+                qty = float(qty)
+
+                price = df[df["Stock"] == name.strip()]["Price"].values[0]
+                value = price * qty
+                total += value
+
+                st.write(f"{name} → ₹ {round(value,1)}")
+
+            except:
+                pass
+
+        st.success(f"Total Portfolio Value: ₹ {round(total,1)}")
+
+    # ================= WATCHLIST =================
+    st.subheader("🚨 BUY Alerts")
+
+    buys = df[df["Decision"].isin(["BUY","STRONG BUY"])]
+
+    if not buys.empty:
+        st.dataframe(buys, use_container_width=True)
+    else:
+        st.info("No BUY signals currently")
+
 else:
-    st.error("No data found. Check stock symbols.")
+    st.error("Check stock symbols")
