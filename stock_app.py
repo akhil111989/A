@@ -1,94 +1,63 @@
-import streamlit as st
-import pandas as pd
-import numpy as np
-import yfinance as yf
-import requests
-from bs4 import BeautifulSoup
-
-st.set_page_config(layout="wide")
-st.title("🚀 FULL INVESTING SYSTEM")
-
-# ================= INPUT =================
-stocks = st.text_input(
-    "Enter Stocks (e.g. TCS, INFY, ITC):",
-    "TCS,INFY,HDFCBANK,RELIANCE,ITC"
-)
-
-stock_list = [s.strip().upper() for s in stocks.split(",")]
-
-# ================= SCREENER =================
-def get_screener(symbol):
-    try:
-        url = f"https://www.screener.in/company/{symbol}/"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        r = requests.get(url, headers=headers)
-        soup = BeautifulSoup(r.text, "html.parser")
-
-        ratios = {}
-        for li in soup.select("li.flex.flex-space-between"):
-            key = li.select_one("span.name").text.strip()
-            val = li.select_one("span.number").text.strip()
-            ratios[key] = val
-
-        return {
-            "PE": float(ratios.get("Stock P/E", "nan").replace(",", "")),
-            "ROCE": float(ratios.get("ROCE", "nan").replace("%", "")),
-            "Dividend": float(ratios.get("Dividend Yield", "0").replace("%", "")),
-        }
-    except:
-        return {}
-
-# ================= MAIN =================
 def analyze(symbol):
     try:
         yf_symbol = symbol + ".NS"
         stock = yf.Ticker(yf_symbol)
 
         hist = stock.history(period="5y")
-        info = stock.info
-        cf = stock.cashflow
-        fin = stock.financials
 
         if hist.empty:
             return None
 
-        price = hist["Close"].iloc[-1]
+        # ===== PRICE (RELIABLE) =====
+        price = hist["Close"].dropna().iloc[-1]
         ath = hist["Close"].max()
         correction = ((price - ath) / ath) * 100
 
-        shares = info.get("sharesOutstanding", np.nan)
-        mcap = price * shares if shares else np.nan
-        ath_mcap = ath * shares if shares else np.nan
-
-        # FCF
-        try:
-            fcf = cf.loc["Total Cash From Operating Activities"][0] - cf.loc["Capital Expenditures"][0]
-        except:
-            fcf = np.nan
-
-        fcf_yield = (fcf / mcap * 100) if mcap and fcf else np.nan
-
-        # Screener data
+        # ===== SCREENER DATA (RELIABLE) =====
         sc = get_screener(symbol)
+
         pe = sc.get("PE", np.nan)
         roce = sc.get("ROCE", np.nan)
         dividend = sc.get("Dividend", np.nan)
+        mcap_cr = sc.get("MarketCap", np.nan)  # already in Cr
 
-        # Growth
-        growth = info.get("earningsGrowth", np.nan)
-        growth = growth * 100 if growth else np.nan
+        # ===== DERIVE SHARES =====
+        shares = (mcap_cr * 1e7) / price if mcap_cr and price else np.nan
 
-        # Debt
-        debt = info.get("totalDebt", np.nan)
-        debt = debt / 1e7 if debt else np.nan
+        # ===== ATH MARKET CAP =====
+        ath_mcap = ath * shares / 1e7 if shares else np.nan
 
-        # Score Engine
+        # ===== FCF (BEST EFFORT) =====
+        try:
+            cf = stock.cashflow
+            fcf = cf.loc["Total Cash From Operating Activities"][0] - cf.loc["Capital Expenditures"][0]
+            fcf_cr = fcf / 1e7
+        except:
+            fcf_cr = np.nan
+
+        fcf_yield = (fcf_cr / mcap_cr * 100) if mcap_cr and fcf_cr else np.nan
+
+        # ===== GROWTH =====
+        try:
+            info = stock.info
+            growth = info.get("earningsGrowth", np.nan)
+            growth = growth * 100 if growth else np.nan
+        except:
+            growth = np.nan
+
+        # ===== DEBT =====
+        try:
+            debt = info.get("totalDebt", np.nan) / 1e7
+        except:
+            debt = np.nan
+
+        # ===== SCORE =====
         score = 0
         if correction < -25: score += 2
         if fcf_yield and fcf_yield > 3: score += 2
         if roce and roce > 18: score += 2
         if growth and growth > 10: score += 1
-        if debt and debt < (mcap/1e7)*0.5: score += 1
+        if debt and mcap_cr and debt < mcap_cr * 0.5: score += 1
 
         if score >= 6:
             decision = "STRONG BUY"
@@ -102,9 +71,11 @@ def analyze(symbol):
         return {
             "Stock": symbol,
             "Price": price,
-            "MCap (Cr)": mcap/1e7 if mcap else np.nan,
+            "MCap (Cr)": mcap_cr,
             "ATH": ath,
+            "ATH MCap (Cr)": ath_mcap,
             "Correction %": correction,
+            "FCF (Cr)": fcf_cr,
             "FCF Yield %": fcf_yield,
             "PE": pe,
             "ROCE %": roce,
@@ -115,63 +86,5 @@ def analyze(symbol):
             "Decision": decision
         }
 
-    except:
+    except Exception as e:
         return None
-
-# ================= RUN =================
-data = []
-
-with st.spinner("Analyzing stocks..."):
-    for s in stock_list:
-        d = analyze(s)
-        if d:
-            data.append(d)
-
-df = pd.DataFrame(data)
-
-# ================= OUTPUT =================
-if not df.empty:
-
-    df = df.round(1)
-    df = df.sort_values(by="Score", ascending=False)
-
-    st.subheader("📊 Ranked Stocks")
-    st.dataframe(df, use_container_width=True)
-
-    # ================= PORTFOLIO =================
-    st.subheader("💼 Portfolio Tracker")
-
-    portfolio = st.text_input(
-        "Enter your holdings (e.g. TCS:100, INFY:50)"
-    )
-
-    if portfolio:
-        total = 0
-        for item in portfolio.split(","):
-            try:
-                name, qty = item.split(":")
-                qty = float(qty)
-
-                price = df[df["Stock"] == name.strip()]["Price"].values[0]
-                value = price * qty
-                total += value
-
-                st.write(f"{name} → ₹ {round(value,1)}")
-
-            except:
-                pass
-
-        st.success(f"Total Portfolio Value: ₹ {round(total,1)}")
-
-    # ================= WATCHLIST =================
-    st.subheader("🚨 BUY Alerts")
-
-    buys = df[df["Decision"].isin(["BUY","STRONG BUY"])]
-
-    if not buys.empty:
-        st.dataframe(buys, use_container_width=True)
-    else:
-        st.info("No BUY signals currently")
-
-else:
-    st.error("Check stock symbols")
