@@ -1,70 +1,117 @@
-def calculate_investment_score(ticker, roce, growth, fcf_yield, pe, avg_pe, correction):
+import yfinance as yf
+import pandas as pd
+import numpy as np
+
+# ======================
+# STOCK LIST
+# ======================
+stocks = [
+    "RELIANCE.NS",
+    "TCS.NS",
+    "INFY.NS",
+    "HDFCBANK.NS"
+]
+
+# ======================
+# ANALYZE FUNCTION
+# ======================
+def analyze(symbol):
+
+    t = yf.Ticker(symbol)
+    info = t.info
+    hist = t.history(period="max")
+
+    hist = hist.dropna()
+
+    price = hist["Close"].iloc[-1]
+
+    ath = hist["Close"].max()
+    atl = hist["Close"].min()
+
+    ath_date = hist["Close"].idxmax().strftime("%d-%b-%Y")
+    atl_date = hist["Close"].idxmin().strftime("%d-%b-%Y")
+
+    correction = ((price - ath) / ath) * 100
+
+    # ======================
+    # FUNDAMENTALS
+    # ======================
+    pe = info.get("trailingPE")
+    roe = info.get("returnOnEquity")
+    growth = info.get("earningsGrowth")
+    dividend = info.get("dividendYield")
+    debt = info.get("debtToEquity")
+
+    if roe: roe *= 100
+    if dividend: dividend *= 100
+
+    # ======================
+    # EVENTS
+    # ======================
+    cal = t.calendar
+
+    try:
+        result_date = str(cal.loc["Earnings Date"][0].date())
+    except:
+        result_date = "NA"
+
+    try:
+        ex_div = str(cal.loc["Ex-Dividend Date"][0].date())
+    except:
+        ex_div = "NA"
+
+    # ======================
+    # SIMPLE SCORE (YOUR ORIGINAL IDEA, CLEANED)
+    # ======================
     score = 0
-    
-    # 1. QUALITY (ROCE)
-    if roce is not None:
-        if roce > 25:
-            score += 2
-        elif roce > 15:
-            score += 1
 
-    # 2. GROWTH
-    if growth is not None:
-        if growth > 15:
-            score += 2
-        elif growth > 8:
-            score += 1
+    if roe and roe > 15:
+        score += 1
 
-    # 3. FCF YIELD
-    if fcf_yield is not None:
-        if fcf_yield > 5:
-            score += 2
-        elif fcf_yield > 2:
-            score += 1
+    if growth and growth > 8:
+        score += 1
 
-    # 4. VALUATION (Relative PE)
-    if pe and avg_pe:
-        if pe < (avg_pe * 0.8):
-            score += 2
-        elif pe < avg_pe:
-            score += 1
+    if pe and pe < 25:
+        score += 1
 
-    # 5. PRICE POSITION (Correction from High)
-    if correction is not None:
-        if correction < -30:
-            score += 2
-        elif correction < -15:
-            score += 1
+    if correction and correction < -20:
+        score += 1
 
-    # FINAL DECISION LOGIC
-    if score >= 7:
-        decision = "STRONG BUY"
-    elif score >= 5:
+    if debt and debt < 50:
+        score += 1
+
+    # ======================
+    # FINAL DECISION
+    # ======================
+    if score >= 4:
         decision = "BUY"
-    elif score >= 3:
+    elif score == 3:
         decision = "HOLD"
     else:
         decision = "SELL"
-        
+
     return {
-        "ticker": ticker,
-        "total_score": score,
-        "decision": decision
+        "Stock": symbol,
+        "Price": price,
+        "ATH": ath,
+        "ATH Date": ath_date,
+        "ATL": atl,
+        "ATL Date": atl_date,
+        "Correction %": correction,
+        "PE": pe,
+        "ROE %": roe,
+        "Growth %": growth,
+        "Debt": debt,
+        "Dividend %": dividend,
+        "Result Date": result_date,
+        "Ex-Dividend": ex_div,
+        "Score": score,
+        "Decision": decision
     }
 
-# --- EXAMPLE USAGE ---
-stock_data = {
-    "ticker": "TECH_CORP",
-    "roce": 28,        # +2
-    "growth": 12,      # +1
-    "fcf_yield": 6,    # +2
-    "pe": 18,          
-    "avg_pe": 25,      # +2 (18 is < 80% of 25)
-    "correction": -10  # +0
-}
+# ======================
+# RUN
+# ======================
+df = pd.DataFrame([analyze(s) for s in stocks])
 
-result = calculate_investment_score(**stock_data)
-
-print(f"Analysis for {result['ticker']}:")
-print(f"Final Score: {result['total_score']}/10")
-print(f"Action: {result['decision']}")
+print(df)
