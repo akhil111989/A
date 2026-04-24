@@ -2,26 +2,25 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 
-# ======================
+# =========================
 # STOCK LIST
-# ======================
+# =========================
 stocks = [
     "RELIANCE.NS",
     "TCS.NS",
     "INFY.NS",
-    "HDFCBANK.NS"
+    "HDFCBANK.NS",
+    "ITC.NS"
 ]
 
-# ======================
-# ANALYZE FUNCTION
-# ======================
-def analyze(symbol):
+# =========================
+# FETCH DATA
+# =========================
+def get_stock(symbol):
 
     t = yf.Ticker(symbol)
     info = t.info
-    hist = t.history(period="max")
-
-    hist = hist.dropna()
+    hist = t.history(period="max").dropna()
 
     price = hist["Close"].iloc[-1]
 
@@ -31,87 +30,98 @@ def analyze(symbol):
     ath_date = hist["Close"].idxmax().strftime("%d-%b-%Y")
     atl_date = hist["Close"].idxmin().strftime("%d-%b-%Y")
 
-    correction = ((price - ath) / ath) * 100
-
-    # ======================
-    # FUNDAMENTALS
-    # ======================
-    pe = info.get("trailingPE")
-    roe = info.get("returnOnEquity")
-    growth = info.get("earningsGrowth")
-    dividend = info.get("dividendYield")
-    debt = info.get("debtToEquity")
-
-    if roe: roe *= 100
-    if dividend: dividend *= 100
-
-    # ======================
-    # EVENTS
-    # ======================
-    cal = t.calendar
-
-    try:
-        result_date = str(cal.loc["Earnings Date"][0].date())
-    except:
-        result_date = "NA"
-
-    try:
-        ex_div = str(cal.loc["Ex-Dividend Date"][0].date())
-    except:
-        ex_div = "NA"
-
-    # ======================
-    # SIMPLE SCORE (YOUR ORIGINAL IDEA, CLEANED)
-    # ======================
-    score = 0
-
-    if roe and roe > 15:
-        score += 1
-
-    if growth and growth > 8:
-        score += 1
-
-    if pe and pe < 25:
-        score += 1
-
-    if correction and correction < -20:
-        score += 1
-
-    if debt and debt < 50:
-        score += 1
-
-    # ======================
-    # FINAL DECISION
-    # ======================
-    if score >= 4:
-        decision = "BUY"
-    elif score == 3:
-        decision = "HOLD"
-    else:
-        decision = "SELL"
+    correction = (price - ath) / ath * 100
 
     return {
-        "Stock": symbol,
-        "Price": price,
-        "ATH": ath,
-        "ATH Date": ath_date,
-        "ATL": atl,
-        "ATL Date": atl_date,
-        "Correction %": correction,
-        "PE": pe,
-        "ROE %": roe,
-        "Growth %": growth,
-        "Debt": debt,
-        "Dividend %": dividend,
-        "Result Date": result_date,
-        "Ex-Dividend": ex_div,
-        "Score": score,
-        "Decision": decision
+        "symbol": symbol,
+        "price": price,
+        "pe": info.get("trailingPE"),
+        "roe": info.get("returnOnEquity"),
+        "growth": info.get("earningsGrowth"),
+        "debt": info.get("debtToEquity"),
+        "margin": info.get("profitMargins"),
+        "ath": ath,
+        "atl": atl,
+        "ath_date": ath_date,
+        "atl_date": atl_date,
+        "correction": correction
     }
 
-# ======================
-# RUN
-# ======================
-df = pd.DataFrame([analyze(s) for s in stocks])
+# =========================
+# NORMALIZATION (IMPORTANT)
+# =========================
+def zscore(x):
+    return (x - np.mean(x)) / (np.std(x) + 1e-9)
 
-print(df)
+# =========================
+# BUILD DATAFRAME
+# =========================
+data = [get_stock(s) for s in stocks]
+df = pd.DataFrame(data)
+
+# fill missing values safely
+df["roe"] = df["roe"].fillna(0) * 100
+df["growth"] = df["growth"].fillna(0)
+df["debt"] = df["debt"].fillna(0)
+df["margin"] = df["margin"].fillna(0)
+df["pe"] = df["pe"].fillna(df["pe"].median())
+
+# =========================
+# FACTOR ENGINE (ELITE MODEL)
+# =========================
+
+# VALUE (cheaper is better)
+df["value_score"] = -zscore(df["pe"])
+
+# QUALITY (ROE + margin)
+df["quality_score"] = zscore(df["roe"]) + zscore(df["margin"])
+
+# GROWTH
+df["growth_score"] = zscore(df["growth"])
+
+# MOMENTUM (deep correction = opportunity)
+df["momentum_score"] = -zscore(df["correction"])
+
+# RISK (lower debt = better)
+df["risk_score"] = -zscore(df["debt"])
+
+# =========================
+# FINAL SCORE (ELITE WEIGHTS)
+# =========================
+df["score"] = (
+    0.25 * df["value_score"] +
+    0.25 * df["quality_score"] +
+    0.20 * df["growth_score"] +
+    0.15 * df["momentum_score"] +
+    0.15 * df["risk_score"]
+)
+
+# =========================
+# DECISION ENGINE
+# =========================
+df["signal"] = pd.qcut(
+    df["score"],
+    q=3,
+    labels=["SELL", "HOLD", "STRONG BUY"]
+)
+
+# rank
+df["rank"] = df["score"].rank(ascending=False)
+
+# =========================
+# OUTPUT
+# =========================
+print(df[[
+    "symbol",
+    "score",
+    "rank",
+    "signal",
+    "price",
+    "pe",
+    "roe",
+    "growth",
+    "debt",
+    "correction",
+    "ath_date",
+    "atl_date"
+]])
