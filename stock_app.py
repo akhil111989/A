@@ -1,141 +1,11 @@
-# ==============================
-# QUANT HEDGE FUND STYLE SYSTEM
-# ==============================
-
+import streamlit as st
 import pandas as pd
 import numpy as np
 import yfinance as yf
-from dataclasses import dataclass
-import warnings
-warnings.filterwarnings("ignore")
 
-
-# =========================================================
-# 1. DATA LAYER (LIVE MARKET DATA)
-# =========================================================
-
-class YahooDataProvider:
-
-    def get_price_data(self, symbol, period="5y"):
-        df = yf.download(symbol + ".NS", period=period, interval="1d", progress=False)
-        df.dropna(inplace=True)
-        return df
-
-    def get_fundamentals(self, symbol):
-
-        t = yf.Ticker(symbol + ".NS")
-        info = t.info
-
-        return {
-            "pe": info.get("trailingPE", np.nan),
-            "pb": info.get("priceToBook", np.nan),
-            "roe": info.get("returnOnEquity", np.nan),
-            "debt_to_equity": info.get("debtToEquity", np.nan),
-            "profit_margin": info.get("profitMargins", np.nan),
-            "revenue_growth": info.get("revenueGrowth", np.nan),
-            "dividend_yield": info.get("dividendYield", 0) or 0
-        }
-
-
-# =========================================================
-# 2. FEATURE ENGINEERING
-# =========================================================
-
-def compute_technical_features(df):
-
-    df["returns"] = df["Close"].pct_change()
-
-    features = {
-        "momentum_3m": (df["Close"].iloc[-1] / df["Close"].iloc[-60] - 1),
-        "momentum_1y": (df["Close"].iloc[-1] / df["Close"].iloc[-252] - 1),
-        "volatility": df["returns"].std() * np.sqrt(252),
-        "max_drawdown": (df["Close"] / df["Close"].cummax() - 1).min(),
-        "price_vs_52w_high": df["Close"].iloc[-1] / df["Close"].max()
-    }
-
-    return features
-
-
-def compute_fundamental_features(f):
-
-    return {
-        "pe": f["pe"],
-        "pb": f["pb"],
-        "roe": f["roe"],
-        "debt_to_equity": f["debt_to_equity"],
-        "profit_margin": f["profit_margin"],
-        "revenue_growth": f["revenue_growth"],
-        "dividend_yield": f["dividend_yield"]
-    }
-
-
-# =========================================================
-# 3. MULTI-FACTOR SCORING ENGINE
-# =========================================================
-
-@dataclass
-class Weights:
-    quality: float = 0.35
-    growth: float = 0.25
-    value: float = 0.25
-    momentum: float = 0.15
-
-
-class FactorModel:
-
-    def score(self, f, t):
-
-        # ------------------
-        # QUALITY SCORE
-        # ------------------
-        quality = (
-            min(f["roe"] / 30, 1) * 0.6 +
-            min(f["profit_margin"] / 0.3, 1) * 0.4
-        )
-
-        # ------------------
-        # GROWTH SCORE
-        # ------------------
-        growth = (
-            max(f["revenue_growth"], 0) * 0.5 +
-            min(f["profit_margin"], 1) * 0.5
-        )
-
-        # ------------------
-        # VALUE SCORE
-        # ------------------
-        value = (
-            (1 / max(f["pe"], 1)) * 0.5 +
-            (1 / max(f["pb"], 1)) * 0.5
-        )
-        value = min(value * 10, 1)
-
-        # ------------------
-        # MOMENTUM SCORE
-        # ------------------
-        momentum = (
-            max(t["momentum_3m"], -1) * 0.4 +
-            max(t["momentum_1y"], -1) * 0.6
-        )
-
-        momentum = (momentum + 1) / 2  # normalize
-
-        # ------------------
-        # FINAL SCORE
-        # ------------------
-        final = (
-            quality * 0.35 +
-            growth * 0.25 +
-            value * 0.25 +
-            momentum * 0.15
-        )
-
-        return round(final * 100, 2)
-
-
-# =========================================================
-# 4. STOCK UNIVERSE
-# =========================================================
+# =========================
+# CONFIG
+# =========================
 
 STOCKS = [
     "RELIANCE",
@@ -148,120 +18,193 @@ STOCKS = [
     "ITC"
 ]
 
+# =========================
+# DATA LAYER
+# =========================
 
-# =========================================================
-# 5. RESEARCH ENGINE
-# =========================================================
+class DataProvider:
 
-class ResearchEngine:
-
-    def __init__(self):
-        self.data = YahooDataProvider()
-        self.model = FactorModel()
-
-    def analyze_stock(self, symbol):
+    def get_fundamentals(self, symbol):
 
         try:
-            price_df = self.data.get_price_data(symbol)
-            fund = self.data.get_fundamentals(symbol)
-
-            if price_df.empty:
-                return None
-
-            tech = compute_technical_features(price_df)
-            fund_feat = compute_fundamental_features(fund)
-
-            score = self.model.score(fund_feat, tech)
+            t = yf.Ticker(symbol + ".NS")
+            info = t.info
 
             return {
-                "stock": symbol,
-                "score": score,
-                **fund_feat,
-                **tech
+                "pe": info.get("trailingPE"),
+                "pb": info.get("priceToBook"),
+                "roe": info.get("returnOnEquity"),
+                "debt_to_equity": info.get("debtToEquity"),
+                "profit_margin": info.get("profitMargins"),
+                "revenue_growth": info.get("revenueGrowth"),
+                "dividend_yield": info.get("dividendYield")
             }
 
-        except Exception as e:
-            print(f"Error for {symbol}: {e}")
-            return None
+        except:
+            return {}
+
+    def get_price(self, symbol):
+
+        try:
+            df = yf.download(symbol + ".NS", period="2y", progress=False)
+            df.dropna(inplace=True)
+            return df
+        except:
+            return pd.DataFrame()
+
+
+# =========================
+# FEATURE ENGINEERING
+# =========================
+
+def safe(val, default=0):
+    if val is None or pd.isna(val):
+        return default
+    return val
+
+
+def compute_technical(df):
+
+    if df.empty:
+        return {
+            "momentum_1y": 0,
+            "volatility": 0,
+            "drawdown": 0
+        }
+
+    df["ret"] = df["Close"].pct_change()
+
+    momentum_1y = (df["Close"].iloc[-1] / df["Close"].iloc[0] - 1)
+    volatility = df["ret"].std() * np.sqrt(252)
+    drawdown = (df["Close"] / df["Close"].cummax() - 1).min()
+
+    return {
+        "momentum_1y": safe(momentum_1y),
+        "volatility": safe(volatility),
+        "drawdown": safe(drawdown)
+    }
+
+
+def compute_fundamental(f):
+
+    return {
+        "pe": safe(f.get("pe"), 50),
+        "pb": safe(f.get("pb"), 5),
+        "roe": safe(f.get("roe"), 10),
+        "debt_to_equity": safe(f.get("debt_to_equity"), 2),
+        "profit_margin": safe(f.get("profit_margin"), 0.1),
+        "revenue_growth": safe(f.get("revenue_growth"), 0.05),
+        "dividend_yield": safe(f.get("dividend_yield"), 0)
+    }
+
+
+# =========================
+# SCORING ENGINE
+# =========================
+
+class Scorer:
+
+    def score(self, f, t):
+
+        # QUALITY
+        quality = (f["roe"] / 30) + (f["profit_margin"] * 2)
+        quality = min(quality / 2, 1)
+
+        # GROWTH
+        growth = max(f["revenue_growth"], 0) * 10
+        growth = min(growth, 1)
+
+        # VALUE
+        value = (1 / max(f["pe"], 1)) + (1 / max(f["pb"], 1))
+        value = min(value * 2, 1)
+
+        # MOMENTUM
+        momentum = (t["momentum_1y"] + 1) / 2
+        momentum = min(max(momentum, 0), 1)
+
+        # FINAL SCORE
+        final = (
+            quality * 0.35 +
+            growth * 0.25 +
+            value * 0.25 +
+            momentum * 0.15
+        )
+
+        return round(final * 100, 2)
+
+
+# =========================
+# ENGINE
+# =========================
+
+class Engine:
+
+    def __init__(self):
+        self.data = DataProvider()
+        self.scorer = Scorer()
+
+    def analyze(self, symbol):
+
+        f = self.data.get_fundamentals(symbol)
+        t = self.data.get_price(symbol)
+
+        f = compute_fundamental(f)
+        t = compute_technical(t)
+
+        score = self.scorer.score(f, t)
+
+        return {
+            "stock": symbol,
+            "score": score,
+            **f,
+            **t
+        }
 
     def run(self):
 
         results = []
 
         for s in STOCKS:
-            res = self.analyze_stock(s)
-            if res:
+            try:
+                res = self.analyze(s)
                 results.append(res)
+            except Exception as e:
+                print(f"Error {s}: {e}")
+
+        if len(results) == 0:
+            return pd.DataFrame(columns=["stock", "score"])
 
         df = pd.DataFrame(results)
+
+        # FORCE SAFE COLUMN EXISTENCE
+        if "score" not in df.columns:
+            df["score"] = 0
+
         return df.sort_values("score", ascending=False)
 
 
-# =========================================================
-# 6. SIMPLE BACKTEST ENGINE
-# =========================================================
+# =========================
+# STREAMLIT UI
+# =========================
 
-class Backtester:
+st.set_page_config(page_title="Quant Stock Screener", layout="wide")
 
-    def __init__(self, engine):
-        self.engine = engine
+st.title("📊 Quant Hedge Fund Style Stock Screener")
 
-    def run(self):
+engine = Engine()
 
-        df = self.engine.run()
+if st.button("Run Screener"):
 
-        top = df.head(3)["stock"].tolist()
+    with st.spinner("Analyzing stocks..."):
 
-        print("\nTOP PICKS:", top)
+        df = engine.run()
 
-        returns = []
+        st.subheader("Top Stocks")
 
-        for stock in top:
+        st.dataframe(df)
 
-            data = yf.download(stock + ".NS", period="1y", progress=False)
-            if data.empty:
-                continue
+        st.subheader("Best Picks")
 
-            ret = data["Close"].pct_change().mean() * 252
-            returns.append(ret)
+        st.write(df.head(3)[["stock", "score"]])
 
-        portfolio_return = np.mean(returns) if returns else 0
-
-        print("\nExpected Portfolio Return (approx):", round(portfolio_return * 100, 2), "%")
-
-
-# =========================================================
-# 7. PORTFOLIO CONSTRUCTION
-# =========================================================
-
-def build_portfolio(df, top_n=5):
-
-    top = df.head(top_n).copy()
-
-    top["weight"] = top["score"] / top["score"].sum()
-
-    return top[["stock", "score", "weight"]]
-
-
-# =========================================================
-# 8. MAIN EXECUTION
-# =========================================================
-
-if __name__ == "__main__":
-
-    engine = ResearchEngine()
-
-    print("\nRUNNING QUANT RESEARCH ENGINE...\n")
-
-    df = engine.run()
-
-    print("\n=== RANKING ===\n")
-    print(df[["stock", "score", "pe", "roe", "momentum_1y"]])
-
-    portfolio = build_portfolio(df)
-
-    print("\n=== PORTFOLIO ===\n")
-    print(portfolio)
-
-    backtester = Backtester(engine)
-    backtester.run()
+        st.line_chart(df.set_index("stock")["score"])
