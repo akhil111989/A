@@ -1,44 +1,54 @@
-import streamlit as st
-import yfinance as yf
-import pandas as pd
-import numpy as np
-import time
-
-st.set_page_config(layout="wide")
-
-stocks = ["RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS", "ITC.NS"]
-
-# =========================
-# SAFE DATA FETCH (NO INFO API)
-# =========================
-def get_stock(symbol):
+def analyze(symbol):
     try:
-        t = yf.Ticker(symbol)
-        hist = t.history(period="5y")
+        import yfinance as yf
+        import numpy as np
 
-        if hist is None or hist.empty:
-            return None
+        ticker = yf.Ticker(symbol)
+        hist = ticker.history(period="max").dropna()
 
-        close = hist["Close"]
+        # ===== PRICE =====
+        price = hist["Close"].iloc[-1]
 
-        price = close.iloc[-1]
-        ath = close.max()
-        atl = close.min()
+        ath_price = hist["Close"].max()
+        ath_date = hist["Close"].idxmax()
 
-        ath_date = close.idxmax().date()
-        atl_date = close.idxmin().date()
+        atl_price = hist["Close"].min()
+        atl_date = hist["Close"].idxmin()
 
-        correction = ((price - ath) / ath) * 100
+        ath_date = ath_date.strftime("%d-%b-%Y")
+        atl_date = atl_date.strftime("%d-%b-%Y")
 
-        returns = close.pct_change().dropna()
-        volatility = returns.std()
+        correction = ((price - ath_price) / ath_price) * 100
 
-        # =========================
-        # ELITE SCORE MODEL
-        # =========================
+        # ===== PE (current + avg approx) =====
+        info = ticker.info
+        pe = info.get("trailingPE", None)
+
+        try:
+            avg_pe = (hist["Close"] / (price / pe)).mean() if pe else None
+        except:
+            avg_pe = None
+
+        # ===== DIVIDEND =====
+        dividend = info.get("dividendYield", None)
+        if dividend:
+            dividend *= 100
+
+        # ===== RESULT + DIV DATE =====
+        try:
+            cal = ticker.calendar
+            result_date = str(cal.loc["Earnings Date"][0].date())
+        except:
+            result_date = "NA"
+
+        try:
+            dividend_date = str(cal.loc["Ex-Dividend Date"][0].date())
+        except:
+            dividend_date = "NA"
+
+        # ===== SCORE ENGINE =====
         score = 0
 
-        # Deep correction opportunity
         if correction < -40:
             score += 3
         elif correction < -25:
@@ -46,72 +56,34 @@ def get_stock(symbol):
         elif correction < -15:
             score += 1
 
-        # Stability
-        if volatility < 0.02:
+        if pe and avg_pe and pe < avg_pe:
             score += 1
 
-        # Trend filter
-        sma_50 = close.rolling(50).mean().iloc[-1]
-        if price > sma_50:
-            score += 1
-
-        # BUY / SELL logic
-        if score >= 4:
-            signal = "BUY"
-        elif score <= 1:
-            signal = "AVOID"
-        else:
-            signal = "WATCH"
+        decision = "STRONG BUY" if score >= 4 else "BUY" if score == 3 else "HOLD" if score == 2 else "AVOID"
 
         return {
             "Stock": symbol,
-            "Price": round(price, 2),
-            "ATH": round(ath, 2),
-            "ATL": round(atl, 2),
+            "Price": price,
+
+            "ATH Price": ath_price,
             "ATH Date": ath_date,
+
+            "ATL Price": atl_price,
             "ATL Date": atl_date,
-            "Correction %": round(correction, 2),
-            "Volatility": round(volatility, 5),
+
+            "Correction %": correction,
+
+            "PE": pe,
+            "Avg PE": avg_pe,
+
+            "Dividend %": dividend,
+
+            "Result Date": result_date,
+            "Dividend Record Date": dividend_date,
+
             "Score": score,
-            "Signal": signal
+            "Decision": decision
         }
 
     except Exception as e:
-        return {
-            "Stock": symbol,
-            "Price": None,
-            "ATH": None,
-            "ATL": None,
-            "ATH Date": None,
-            "ATL Date": None,
-            "Correction %": None,
-            "Volatility": None,
-            "Score": 0,
-            "Signal": "ERROR"
-        }
-
-# =========================
-# UI
-# =========================
-st.title("📊 Elite Stock Intelligence Model")
-
-data = []
-
-progress = st.progress(0)
-
-for i, s in enumerate(stocks):
-    data.append(get_stock(s))
-    progress.progress((i + 1) / len(stocks))
-    time.sleep(0.5)  # prevents rate limit
-
-df = pd.DataFrame(data)
-
-st.dataframe(df, use_container_width=True)
-
-st.markdown("### 🧠 Signals Summary")
-
-col1, col2, col3 = st.columns(3)
-
-col1.metric("BUY", len(df[df["Signal"] == "BUY"]))
-col2.metric("WATCH", len(df[df["Signal"] == "WATCH"]))
-col3.metric("AVOID", len(df[df["Signal"] == "AVOID"]))
+        return {"Stock": symbol, "Error": str(e)}
