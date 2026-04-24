@@ -4,117 +4,186 @@ import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 
-st.title("Ultimate Stock Screener (All-in-One)")
+st.set_page_config(layout="wide")
+st.title("🏦 Institutional Stock Screener")
 
 stocks_input = st.text_area(
     "Enter stocks (comma separated, e.g. TCS.NS, INFY.NS, RELIANCE.NS)"
 )
 
+# 🔹 Formatting helpers
 def to_crore(x):
     try:
-        return round(x / 1e7, 2)
+        return round(x / 1e7, 1)
     except:
         return None
 
-# 🔹 Screener Data Function
-def get_screener_data(stock_name):
+def pct(x):
     try:
-        url = f"https://www.screener.in/company/{stock_name}/"
+        return round(x * 100, 1)
+    except:
+        return None
+
+def r1(x):
+    try:
+        return round(x, 1)
+    except:
+        return None
+
+# 🔹 Screener Data
+def get_screener(stock):
+    try:
+        url = f"https://www.screener.in/company/{stock}/"
         headers = {"User-Agent": "Mozilla/5.0"}
         r = requests.get(url, headers=headers)
         soup = BeautifulSoup(r.text, "html.parser")
 
         ratios = {}
-
         for li in soup.select("ul#top-ratios li"):
             name = li.select_one("span.name").text.strip()
-            value = li.select_one("span.number").text.strip()
-            ratios[name] = value
+            val = li.select_one("span.number").text.strip()
+            ratios[name] = val
 
-        return {
-            "ROCE": ratios.get("Return on capital employed"),
-            "ROE": ratios.get("Return on equity"),
-            "PE_alt": ratios.get("P/E"),
-            "Dividend_alt": ratios.get("Dividend Yield"),
-        }
+        growth = {}
+        for row in soup.select("table.data-table tbody tr"):
+            cols = [c.text.strip() for c in row.find_all("td")]
+            if len(cols) >= 2:
+                growth[cols[0]] = cols[-1]
+
+        return ratios, growth
     except:
-        return {}
+        return {}, {}
+
+# 🔹 Trend
+def trend_flag(val):
+    try:
+        v = float(val.replace("%",""))
+        if v > 20:
+            return "↑ Strong"
+        elif v > 12:
+            return "→ Stable"
+        else:
+            return "↓ Weak"
+    except:
+        return None
 
 if stocks_input:
     stocks = [s.strip() for s in stocks_input.split(",")]
 
-    results = []
+    rows = []
 
-    for i, stock in enumerate(stocks, start=1):
+    for i, stock in enumerate(stocks, 1):
         try:
-            ticker = yf.Ticker(stock)
-            info = ticker.info
-            hist = ticker.history(period="5y")
+            t = yf.Ticker(stock)
+            info = t.info
+            hist = t.history(period="5y")
 
-            screener = get_screener_data(stock.replace(".NS",""))
+            ratios, growth = get_screener(stock.replace(".NS",""))
 
-            price = info.get("currentPrice")
-            market_cap = info.get("marketCap")
-            pe = info.get("trailingPE")
-            div_yield = info.get("dividendYield")
+            price = r1(info.get("currentPrice"))
+            mc = to_crore(info.get("marketCap"))
+            pe = r1(info.get("trailingPE"))
+            margin = pct(info.get("profitMargins"))
 
-            # ATH price
+            # Dividend %
+            div = info.get("dividendYield")
+            div = pct(div) if div else ratios.get("Dividend Yield")
+
+            # ATH
             ath_price = hist["Close"].max() if not hist.empty else None
+            ath_price = r1(ath_price)
 
-            # ATH market cap
             ath_mc = None
-            if ath_price and price and market_cap:
-                ath_mc = (ath_price / price) * market_cap
+            if ath_price and price and mc:
+                ath_mc = r1((ath_price/price)*mc)
 
-            # Correction %
-            correction = None
+            corr = None
             if ath_price and price:
-                correction = round(((ath_price - price) / ath_price) * 100, 2)
+                corr = r1(((ath_price-price)/ath_price)*100)
 
             # FCF
-            fcf = None
-            fcf_yield = None
+            fcf, fcf_y = None, None
             try:
-                cf = ticker.cashflow
-                fcf = cf.loc["Free Cash Flow"][0]
-                if market_cap and fcf:
-                    fcf_yield = round((fcf / market_cap) * 100, 2)
+                cf = t.cashflow
+                fcf = to_crore(cf.loc["Free Cash Flow"][0])
+                if mc and fcf:
+                    fcf_y = r1((fcf/(mc))*100)
             except:
                 pass
 
-            # Margins
-            margin = info.get("profitMargins")
+            # PE history
+            pe_avg, pe_ath = None, None
+            try:
+                eps = info.get("trailingEps")
+                if eps and not hist.empty:
+                    pe_series = hist["Close"]/eps
+                    pe_avg = r1(pe_series.mean())
+                    pe_ath = r1(pe_series.max())
+            except:
+                pass
 
-            # Basic Decision Logic
-            decision = "HOLD"
-            if correction and correction > 30 and fcf_yield and fcf_yield > 5:
-                decision = "BUY"
-            elif correction and correction < 10:
-                decision = "SELL"
+            roce = ratios.get("Return on capital employed")
 
-            results.append({
+            # 🔥 Score
+            score = 0
+            if corr and corr > 25: score += 1
+            if pe and pe_avg and pe < pe_avg: score += 1
+            try:
+                if float(roce.replace("%","")) > 18: score += 1
+            except: pass
+            if margin and margin > 15: score += 1
+            if fcf_y and fcf_y > 5: score += 1
+            if growth.get("Profit Growth"): score += 1
+
+            if score >= 5:
+                decision = "🟢 STRONG BUY"
+            elif score >= 3:
+                decision = "🟡 BUY"
+            elif score == 2:
+                decision = "⚪ HOLD"
+            else:
+                decision = "🔴 AVOID"
+
+            rows.append({
                 "S.No": i,
                 "Stock": stock,
                 "Price": price,
-                "MC (₹ Cr)": to_crore(market_cap),
+                "MC (₹ Cr)": mc,
                 "ATH Price": ath_price,
-                "ATH MC (₹ Cr)": to_crore(ath_mc),
-                "Correction %": correction,
-                "FCF (₹ Cr)": to_crore(fcf),
-                "FCF Yield %": fcf_yield,
-                "PE (Yahoo)": pe,
-                "PE (Screener)": screener.get("PE_alt"),
-                "ROCE": screener.get("ROCE"),
-                "ROE": screener.get("ROE"),
-                "Margins": margin,
-                "Dividend %": round(div_yield*100,2) if div_yield else screener.get("Dividend_alt"),
+                "ATH MC": ath_mc,
+                "Corr %": corr,
+                "PE": pe,
+                "PE Avg": pe_avg,
+                "PE ATH": pe_ath,
+                "ROCE": roce,
+                "ROCE Trend": trend_flag(roce),
+                "Margins %": margin,
+                "Profit Growth": growth.get("Profit Growth"),
+                "FCF (₹ Cr)": fcf,
+                "FCF Yield %": fcf_y,
+                "Dividend %": div,
+                "Score": score,
                 "Decision": decision
             })
 
         except:
             pass
 
-    df = pd.DataFrame(results)
+    df = pd.DataFrame(rows)
 
-    st.subheader("📊 Screener Output")
-    st.dataframe(df)
+    st.subheader("📊 Institutional Screener Output")
+
+    def style(val):
+        if "STRONG BUY" in str(val): return "background-color:#90ee90"
+        if "BUY" in str(val): return "background-color:#fff3cd"
+        if "AVOID" in str(val): return "background-color:#f8d7da"
+        return ""
+
+    st.dataframe(df.style.applymap(style, subset=["Decision"]), use_container_width=True)
+
+    st.download_button(
+        "📥 Download Excel",
+        df.to_csv(index=False),
+        "screener.csv",
+        "text/csv"
+    )
