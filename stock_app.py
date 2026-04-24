@@ -1,103 +1,136 @@
 import streamlit as st
-import pandas as pd
 import yfinance as yf
+import pandas as pd
+import numpy as np
+from datetime import datetime
 
-st.set_page_config(layout="wide")
+st.set_page_config(page_title="Advanced Stock Screener", layout="wide")
 
-st.title("⚓ STOCK DASHBOARD (STABLE VERSION)")
+st.title("📊 Advanced Stock Screener (ATH / ATL / Fundamentals)")
 
-stocks_input = st.text_area(
-    "Enter stocks (comma separated)",
-    "RELIANCE.NS, TCS.NS, INFY.NS"
-)
+ticker_input = st.text_input("Enter Stock Ticker (e.g. RELIANCE.NS, TCS.NS, AAPL)", "RELIANCE.NS")
 
-stocks = [s.strip() for s in stocks_input.split(",") if s.strip()]
 
-# ---------- SAFE FETCH ----------
-def get_stock(symbol):
+# ---------------- HELPERS ---------------- #
+
+def to_crores(value):
     try:
-        t = yf.Ticker(symbol)
+        return round(value / 1e7, 2)
+    except:
+        return None
 
-        hist = t.history(period="1y")
 
-        if hist is None or hist.empty:
-            return {"Stock": symbol, "Error": "No price data"}
+def get_5y_avg_pe(history):
+    try:
+        pe_series = history["Close"] / history["Earnings"]
+        return round(np.nanmean(pe_series), 2)
+    except:
+        return None
 
-        price = float(hist["Close"].iloc[-1])
-        ath = float(hist["Close"].max())
-        atl = float(hist["Close"].min())
 
-        ath_date = hist["Close"].idxmax()
-        atl_date = hist["Close"].idxmin()
+def get_stock_data(ticker):
+    stock = yf.Ticker(ticker)
 
-        # SAFE conversion
-        try:
-            ath_date = str(ath_date.date())
-            atl_date = str(atl_date.date())
-        except:
-            ath_date = "NA"
-            atl_date = "NA"
+    info = stock.info
+    hist = stock.history(period="5y")
 
-        correction = ((price - ath) / ath) * 100 if ath else 0
+    if hist.empty:
+        return None, None
 
-        # SAFE INFO (NO CRASH IF BLOCKED)
-        try:
-            info = t.get_info()
-        except:
-            info = {}
+    # ATH / ATL
+    ath = hist["High"].max()
+    atl = hist["Low"].min()
 
-        pe = info.get("trailingPE", None)
-        mcap = info.get("marketCap", None)
+    ath_date = hist["High"].idxmax().date()
+    atl_date = hist["Low"].idxmin().date()
 
-        if mcap:
-            mcap = mcap / 1e7  # Cr
+    current_price = hist["Close"].iloc[-1]
 
-        # SIMPLE SCORE (NO COMPLEX LOGIC)
-        score = 0
-        if pe and pe < 25:
-            score += 1
-        if correction < -20:
-            score += 1
+    # correction from ATH
+    correction = round((ath - current_price) / ath * 100, 2)
 
-        decision = "BUY" if score == 2 else "HOLD" if score == 1 else "WATCH"
+    # Market cap
+    market_cap = to_crores(info.get("marketCap", None))
 
-        return {
-            "Stock": symbol,
-            "Price": round(price, 2),
-            "ATH": round(ath, 2),
-            "ATL": round(atl, 2),
-            "ATH Date": ath_date,
-            "ATL Date": atl_date,
-            "Correction %": round(correction, 2),
-            "PE": pe,
-            "MCap (Cr)": mcap,
-            "Score": score,
-            "Decision": decision
-        }
+    # PE
+    pe = info.get("trailingPE", None)
 
-    except Exception as e:
-        return {"Stock": symbol, "Error": str(e)}
+    # Dividend yield
+    div_yield = info.get("dividendYield", None)
+    if div_yield:
+        div_yield *= 100
 
-# ---------- RUN ----------
-if st.button("Run Analysis"):
+    # ROCE approximation (ROE fallback if ROCE missing)
+    roce = info.get("returnOnEquity", None)
+    if roce:
+        roce *= 100
 
-    st.write("Processing stocks...")
+    # Dividend date
+    div_date = info.get("exDividendDate", None)
 
-    data = []
+    # Free Cash Flow
+    try:
+        fcf = stock.cashflow.loc["Free Cash Flow"].iloc[0]
+        fcf_crore = to_crores(fcf)
+    except:
+        fcf_crore = None
 
-    for s in stocks:
-        result = get_stock(s)
-        data.append(result)
+    # Earnings date (result date)
+    earnings_date = info.get("earningsDate", None)
 
-    df = pd.DataFrame(data)
+    return {
+        "current_price": current_price,
+        "ath": ath,
+        "ath_date": ath_date,
+        "atl": atl,
+        "atl_date": atl_date,
+        "correction_pct": correction,
+        "market_cap_crore": market_cap,
+        "pe": pe,
+        "roce": roce,
+        "dividend_yield": div_yield,
+        "fcf_crore": fcf_crore,
+        "earnings_date": earnings_date,
+        "dividend_date": div_date
+    }, hist
 
-    st.subheader("📊 Results")
-    st.dataframe(df, use_container_width=True)
 
-    # ---------- SUMMARY ----------
-    if not df.empty:
+# ---------------- UI ---------------- #
+
+if st.button("Analyze Stock"):
+
+    data, hist = get_stock_data(ticker_input)
+
+    if data is None:
+        st.error("No data found. Check ticker.")
+    else:
+
         col1, col2, col3 = st.columns(3)
 
-        col1.metric("Total Stocks", len(df))
-        col2.metric("Buy Signals", len(df[df.get("Decision") == "BUY"]))
-        col3.metric("Watch List", len(df[df.get("Decision") == "WATCH"]))
+        col1.metric("Current Price", round(data["current_price"], 2))
+        col2.metric("ATH", f'{data["ath"]:.2f}', f'Date: {data["ath_date"]}')
+        col3.metric("ATL", f'{data["atl"]:.2f}', f'Date: {data["atl_date"]}')
+
+        st.divider()
+
+        col4, col5, col6 = st.columns(3)
+
+        col4.metric("Correction from ATH", f'{data["correction_pct"]}%')
+        col5.metric("Market Cap (Cr)", data["market_cap_crore"])
+        col6.metric("PE Ratio", data["pe"])
+
+        col7, col8, col9 = st.columns(3)
+
+        col7.metric("ROCE / ROE %", data["roce"])
+        col8.metric("Dividend Yield %", data["dividend_yield"])
+        col9.metric("FCF (Cr)", data["fcf_crore"])
+
+        st.divider()
+
+        st.subheader("📅 Key Events")
+
+        st.write("**Earnings / Result Date:**", data["earnings_date"])
+        st.write("**Dividend Date:**", data["dividend_date"])
+
+        st.subheader("📉 Price Chart (5Y)")
+        st.line_chart(hist["Close"])
