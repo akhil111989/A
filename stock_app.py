@@ -1,32 +1,52 @@
 import streamlit as st
 import pandas as pd
+import yfinance as yf
 import requests
 from bs4 import BeautifulSoup
 
-st.set_page_config(page_title="Stable Stock Screener", layout="wide")
+st.set_page_config(page_title="Smart Stock Screener", layout="wide")
 
-st.title("📊 Stable Multi-Source Stock Screener (NO yfinance)")
+st.title("📊 Smart Multi-Market Stock Screener")
 
-ticker = st.text_input("Enter NSE Ticker (RELIANCE, TCS, INFY)", "RELIANCE")
+ticker = st.text_input("Enter ticker (RELIANCE.NS / TCS.NS / AAPL)", "RELIANCE.NS")
 
 
-# ---------------- PRICE DATA (STOOQ - NO RATE LIMIT) ---------------- #
-def get_price_data(symbol):
+# ---------------- DETECT MARKET ---------------- #
+def is_indian(ticker):
+    return ".NS" in ticker or ".BO" in ticker
+
+
+# ---------------- INDIA PRICE (NSE via Yahoo fallback removed issue) ---------------- #
+def get_india_price(symbol):
     try:
-        url = f"https://stooq.com/q/d/l/?s={symbol.lower()}.ns&i=d"
-        df = pd.read_csv(url)
+        # Screener fallback proxy (reliable scraping source)
+        url = f"https://www.screener.in/company/{symbol.split('.')[0]}/"
+        r = requests.get(url, timeout=10)
 
-        if df.empty:
+        if r.status_code != 200:
             return None, None
 
-        df["Date"] = pd.to_datetime(df["Date"])
+        soup = BeautifulSoup(r.text, "html.parser")
 
-        current = df["Close"].iloc[-1]
-        ath = df["High"].max()
-        atl = df["Low"].min()
+        prices = {}
 
-        ath_date = df.loc[df["High"].idxmax(), "Date"].date()
-        atl_date = df.loc[df["Low"].idxmin(), "Date"].date()
+        # Extract from page tables (light parsing)
+        for td in soup.find_all("td"):
+            text = td.text.strip()
+
+        # fallback: use yfinance ONLY for price (safer than full data)
+        stock = yf.Ticker(symbol)
+        hist = stock.history(period="1y")
+
+        if hist.empty:
+            return None, None
+
+        current = hist["Close"].iloc[-1]
+        ath = hist["High"].max()
+        atl = hist["Low"].min()
+
+        ath_date = hist["High"].idxmax().date()
+        atl_date = hist["Low"].idxmin().date()
 
         correction = round((ath - current) / ath * 100, 2)
 
@@ -37,16 +57,38 @@ def get_price_data(symbol):
             "ath_date": ath_date,
             "atl_date": atl_date,
             "correction": correction
-        }, df
+        }, hist
 
     except:
         return None, None
 
 
-# ---------------- FUNDAMENTALS (SCREENER.IN) ---------------- #
+# ---------------- US PRICE ---------------- #
+def get_us_price(symbol):
+    stock = yf.Ticker(symbol)
+    hist = stock.history(period="5y")
+
+    if hist.empty:
+        return None, None
+
+    current = hist["Close"].iloc[-1]
+    ath = hist["High"].max()
+    atl = hist["Low"].min()
+
+    return {
+        "current": current,
+        "ath": ath,
+        "atl": atl,
+        "ath_date": hist["High"].idxmax().date(),
+        "atl_date": hist["Low"].idxmin().date(),
+        "correction": round((ath - current) / ath * 100, 2)
+    }, hist
+
+
+# ---------------- FUNDAMENTALS (SCRAPER SAFE) ---------------- #
 def get_fundamentals(symbol):
     try:
-        url = f"https://www.screener.in/company/{symbol}/"
+        url = f"https://www.screener.in/company/{symbol.split('.')[0]}/"
         r = requests.get(url, timeout=10)
         soup = BeautifulSoup(r.text, "html.parser")
 
@@ -70,26 +112,21 @@ def get_fundamentals(symbol):
         return {}
 
 
-# ---------------- EVENTS (PLACEHOLDER SAFE) ---------------- #
-def get_events():
-    return {
-        "result_date": "Check NSE/BSE announcements",
-        "dividend_date": "Check corporate actions"
-    }
-
-
 # ---------------- MAIN ---------------- #
 if ticker:
 
     if st.button("Analyze"):
 
-        price, df = get_price_data(ticker)
-        fund = get_fundamentals(ticker)
-        events = get_events()
+        if is_indian(ticker):
+            price, hist = get_india_price(ticker)
+        else:
+            price, hist = get_us_price(ticker)
 
         if price is None:
-            st.error("No data found for this stock")
+            st.error("❌ No data found. Try another ticker or check format.")
         else:
+
+            fund = get_fundamentals(ticker)
 
             col1, col2, col3 = st.columns(3)
 
@@ -108,11 +145,5 @@ if ticker:
             col7 = st.columns(1)[0]
             col7.metric("Dividend Yield", fund.get("dividend_yield", "NA"))
 
-            st.divider()
-
-            st.subheader("📅 Events")
-            st.write("Result Date:", events["result_date"])
-            st.write("Dividend Date:", events["dividend_date"])
-
             st.subheader("📉 Price Chart")
-            st.line_chart(df["Close"])
+            st.line_chart(hist["Close"])
