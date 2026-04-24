@@ -1,74 +1,117 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
+import numpy as np
 import time
 
-# =========================
-# STOCK LIST
-# =========================
-stocks = [
-    "RELIANCE.NS",
-    "TCS.NS",
-    "INFY.NS",
-    "HDFCBANK.NS",
-    "ITC.NS"
-]
+st.set_page_config(layout="wide")
+
+stocks = ["RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS", "ITC.NS"]
 
 # =========================
-# SAFE FETCH (NO CRASH)
+# SAFE DATA FETCH (NO INFO API)
 # =========================
-@st.cache_data(ttl=3600)
 def get_stock(symbol):
-
-    t = yf.Ticker(symbol)
-    hist = t.history(period="5y").dropna()
-
-    price = hist["Close"].iloc[-1]
-
-    ath = hist["Close"].max()
-    atl = hist["Close"].min()
-
-    ath_date = hist["Close"].idxmax().strftime("%d-%b-%Y")
-    atl_date = hist["Close"].idxmin().strftime("%d-%b-%Y")
-
-    correction = (price - ath) / ath * 100
-
-    # SAFE DATA ONLY
-    fi = {}
     try:
-        fi = t.fast_info
-    except:
-        pass
+        t = yf.Ticker(symbol)
+        hist = t.history(period="5y")
 
-    pe = fi.get("trailing_pe", None)
-    market_cap = fi.get("market_cap", None)
+        if hist is None or hist.empty:
+            return None
 
-    # =========================
-    # SIMPLE QUALITY MODEL (YOUR ORIGINAL STYLE)
-    # =========================
-    score = 0
+        close = hist["Close"]
 
-    # Quality
-    if pe and pe < 25:
-        score += 1
+        price = close.iloc[-1]
+        ath = close.max()
+        atl = close.min()
 
-    # Opportunity
-    if correction < -20:
-        score += 1
+        ath_date = close.idxmax().date()
+        atl_date = close.idxmin().date()
 
-    # Stability (volatility proxy)
-    returns = hist["Close"].pct_change().dropna()
-    volatility = returns.std()
+        correction = ((price - ath) / ath) * 100
 
-    if volatility < 0.02:
-        score += 1
+        returns = close.pct_change().dropna()
+        volatility = returns.std()
 
-    # Debt proxy (not always available → safe handling)
-    debt = None
-    try:
-        debt = fi.get("debt_to_equity", None)
-    except:
-        pass
+        # =========================
+        # ELITE SCORE MODEL
+        # =========================
+        score = 0
 
-    if debt is not None and debt < 1:
-        score
+        # Deep correction opportunity
+        if correction < -40:
+            score += 3
+        elif correction < -25:
+            score += 2
+        elif correction < -15:
+            score += 1
+
+        # Stability
+        if volatility < 0.02:
+            score += 1
+
+        # Trend filter
+        sma_50 = close.rolling(50).mean().iloc[-1]
+        if price > sma_50:
+            score += 1
+
+        # BUY / SELL logic
+        if score >= 4:
+            signal = "BUY"
+        elif score <= 1:
+            signal = "AVOID"
+        else:
+            signal = "WATCH"
+
+        return {
+            "Stock": symbol,
+            "Price": round(price, 2),
+            "ATH": round(ath, 2),
+            "ATL": round(atl, 2),
+            "ATH Date": ath_date,
+            "ATL Date": atl_date,
+            "Correction %": round(correction, 2),
+            "Volatility": round(volatility, 5),
+            "Score": score,
+            "Signal": signal
+        }
+
+    except Exception as e:
+        return {
+            "Stock": symbol,
+            "Price": None,
+            "ATH": None,
+            "ATL": None,
+            "ATH Date": None,
+            "ATL Date": None,
+            "Correction %": None,
+            "Volatility": None,
+            "Score": 0,
+            "Signal": "ERROR"
+        }
+
+# =========================
+# UI
+# =========================
+st.title("📊 Elite Stock Intelligence Model")
+
+data = []
+
+progress = st.progress(0)
+
+for i, s in enumerate(stocks):
+    data.append(get_stock(s))
+    progress.progress((i + 1) / len(stocks))
+    time.sleep(0.5)  # prevents rate limit
+
+df = pd.DataFrame(data)
+
+st.dataframe(df, use_container_width=True)
+
+st.markdown("### 🧠 Signals Summary")
+
+col1, col2, col3 = st.columns(3)
+
+col1.metric("BUY", len(df[df["Signal"] == "BUY"]))
+col2.metric("WATCH", len(df[df["Signal"] == "WATCH"]))
+col3.metric("AVOID", len(df[df["Signal"] == "AVOID"]))
