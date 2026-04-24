@@ -1,7 +1,6 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import numpy as np
 import time
 
 # =========================
@@ -16,17 +15,13 @@ stocks = [
 ]
 
 # =========================
-# CACHE (IMPORTANT FOR STREAMLIT)
+# SAFE FETCH (NO CRASH)
 # =========================
 @st.cache_data(ttl=3600)
 def get_stock(symbol):
 
     t = yf.Ticker(symbol)
-
-    # =========================
-    # PRICE DATA
-    # =========================
-    hist = t.history(period="max").dropna()
+    hist = t.history(period="5y").dropna()
 
     price = hist["Close"].iloc[-1]
 
@@ -38,103 +33,42 @@ def get_stock(symbol):
 
     correction = (price - ath) / ath * 100
 
-    # =========================
-    # SAFE FUNDAMENTALS (NO .info = NO RATE LIMIT CRASH)
-    # =========================
+    # SAFE DATA ONLY
+    fi = {}
     try:
         fi = t.fast_info
     except:
-        fi = {}
+        pass
 
     pe = fi.get("trailing_pe", None)
-    debt = fi.get("debt_to_equity", None)
+    market_cap = fi.get("market_cap", None)
 
     # =========================
-    # OPTIONAL CALENDAR (SAFE TRY)
-    # =========================
-    try:
-        cal = t.calendar
-        result_date = str(cal.loc["Earnings Date"][0].date())
-    except:
-        result_date = "NA"
-
-    try:
-        ex_div = str(cal.loc["Ex-Dividend Date"][0].date())
-    except:
-        ex_div = "NA"
-
-    # =========================
-    # ELITE SCORE (CLEAN VERSION)
+    # SIMPLE QUALITY MODEL (YOUR ORIGINAL STYLE)
     # =========================
     score = 0
 
-    # VALUE
+    # Quality
     if pe and pe < 25:
         score += 1
 
-    # MOMENTUM (deep correction = opportunity)
+    # Opportunity
     if correction < -20:
         score += 1
 
-    # RISK
-    if debt is not None and debt < 1:
+    # Stability (volatility proxy)
+    returns = hist["Close"].pct_change().dropna()
+    volatility = returns.std()
+
+    if volatility < 0.02:
         score += 1
 
-    # (Growth / ROE skipped safely because unreliable in fast_info)
+    # Debt proxy (not always available → safe handling)
+    debt = None
+    try:
+        debt = fi.get("debt_to_equity", None)
+    except:
+        pass
 
-    # =========================
-    # FINAL DECISION
-    # =========================
-    if score >= 3:
-        decision = "STRONG BUY"
-    elif score == 2:
-        decision = "BUY"
-    elif score == 1:
-        decision = "HOLD"
-    else:
-        decision = "SELL"
-
-    return {
-        "Stock": symbol,
-        "Price": price,
-        "PE": pe,
-        "Debt": debt,
-        "ATH": ath,
-        "ATL": atl,
-        "ATH Date": ath_date,
-        "ATL Date": atl_date,
-        "Correction %": correction,
-        "Result Date": result_date,
-        "Ex-Dividend": ex_div,
-        "Score": score,
-        "Decision": decision
-    }
-
-
-# =========================
-# RUN ENGINE (RATE LIMIT SAFE)
-# =========================
-data = []
-
-for s in stocks:
-    data.append(get_stock(s))
-    time.sleep(1.5)   # IMPORTANT: prevents Yahoo block
-
-df = pd.DataFrame(data)
-
-# =========================
-# DISPLAY DASHBOARD
-# =========================
-st.title("⚓ Elite Stock Screener Dashboard")
-
-st.dataframe(df)
-
-# =========================
-# SUMMARY PANEL
-# =========================
-st.subheader("📊 Summary")
-
-st.write("Total Stocks:", len(df))
-st.write("Strong Buy:", len(df[df["Decision"] == "STRONG BUY"]))
-st.write("Buy:", len(df[df["Decision"] == "BUY"]))
-st.write("Sell:", len(df[df["Decision"] == "SELL"]))
+    if debt is not None and debt < 1:
+        score
