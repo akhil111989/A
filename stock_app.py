@@ -1,6 +1,8 @@
+import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import time
 
 # =========================
 # STOCK LIST
@@ -14,12 +16,16 @@ stocks = [
 ]
 
 # =========================
-# FETCH DATA
+# CACHE (IMPORTANT FOR STREAMLIT)
 # =========================
+@st.cache_data(ttl=3600)
 def get_stock(symbol):
 
     t = yf.Ticker(symbol)
-    info = t.info
+
+    # =========================
+    # PRICE DATA
+    # =========================
     hist = t.history(period="max").dropna()
 
     price = hist["Close"].iloc[-1]
@@ -32,96 +38,103 @@ def get_stock(symbol):
 
     correction = (price - ath) / ath * 100
 
+    # =========================
+    # SAFE FUNDAMENTALS (NO .info = NO RATE LIMIT CRASH)
+    # =========================
+    try:
+        fi = t.fast_info
+    except:
+        fi = {}
+
+    pe = fi.get("trailing_pe", None)
+    debt = fi.get("debt_to_equity", None)
+
+    # =========================
+    # OPTIONAL CALENDAR (SAFE TRY)
+    # =========================
+    try:
+        cal = t.calendar
+        result_date = str(cal.loc["Earnings Date"][0].date())
+    except:
+        result_date = "NA"
+
+    try:
+        ex_div = str(cal.loc["Ex-Dividend Date"][0].date())
+    except:
+        ex_div = "NA"
+
+    # =========================
+    # ELITE SCORE (CLEAN VERSION)
+    # =========================
+    score = 0
+
+    # VALUE
+    if pe and pe < 25:
+        score += 1
+
+    # MOMENTUM (deep correction = opportunity)
+    if correction < -20:
+        score += 1
+
+    # RISK
+    if debt is not None and debt < 1:
+        score += 1
+
+    # (Growth / ROE skipped safely because unreliable in fast_info)
+
+    # =========================
+    # FINAL DECISION
+    # =========================
+    if score >= 3:
+        decision = "STRONG BUY"
+    elif score == 2:
+        decision = "BUY"
+    elif score == 1:
+        decision = "HOLD"
+    else:
+        decision = "SELL"
+
     return {
-        "symbol": symbol,
-        "price": price,
-        "pe": info.get("trailingPE"),
-        "roe": info.get("returnOnEquity"),
-        "growth": info.get("earningsGrowth"),
-        "debt": info.get("debtToEquity"),
-        "margin": info.get("profitMargins"),
-        "ath": ath,
-        "atl": atl,
-        "ath_date": ath_date,
-        "atl_date": atl_date,
-        "correction": correction
+        "Stock": symbol,
+        "Price": price,
+        "PE": pe,
+        "Debt": debt,
+        "ATH": ath,
+        "ATL": atl,
+        "ATH Date": ath_date,
+        "ATL Date": atl_date,
+        "Correction %": correction,
+        "Result Date": result_date,
+        "Ex-Dividend": ex_div,
+        "Score": score,
+        "Decision": decision
     }
 
-# =========================
-# NORMALIZATION (IMPORTANT)
-# =========================
-def zscore(x):
-    return (x - np.mean(x)) / (np.std(x) + 1e-9)
 
 # =========================
-# BUILD DATAFRAME
+# RUN ENGINE (RATE LIMIT SAFE)
 # =========================
-data = [get_stock(s) for s in stocks]
+data = []
+
+for s in stocks:
+    data.append(get_stock(s))
+    time.sleep(1.5)   # IMPORTANT: prevents Yahoo block
+
 df = pd.DataFrame(data)
 
-# fill missing values safely
-df["roe"] = df["roe"].fillna(0) * 100
-df["growth"] = df["growth"].fillna(0)
-df["debt"] = df["debt"].fillna(0)
-df["margin"] = df["margin"].fillna(0)
-df["pe"] = df["pe"].fillna(df["pe"].median())
+# =========================
+# DISPLAY DASHBOARD
+# =========================
+st.title("⚓ Elite Stock Screener Dashboard")
+
+st.dataframe(df)
 
 # =========================
-# FACTOR ENGINE (ELITE MODEL)
+# SUMMARY PANEL
 # =========================
+st.subheader("📊 Summary")
 
-# VALUE (cheaper is better)
-df["value_score"] = -zscore(df["pe"])
-
-# QUALITY (ROE + margin)
-df["quality_score"] = zscore(df["roe"]) + zscore(df["margin"])
-
-# GROWTH
-df["growth_score"] = zscore(df["growth"])
-
-# MOMENTUM (deep correction = opportunity)
-df["momentum_score"] = -zscore(df["correction"])
-
-# RISK (lower debt = better)
-df["risk_score"] = -zscore(df["debt"])
-
-# =========================
-# FINAL SCORE (ELITE WEIGHTS)
-# =========================
-df["score"] = (
-    0.25 * df["value_score"] +
-    0.25 * df["quality_score"] +
-    0.20 * df["growth_score"] +
-    0.15 * df["momentum_score"] +
-    0.15 * df["risk_score"]
-)
-
-# =========================
-# DECISION ENGINE
-# =========================
-df["signal"] = pd.qcut(
-    df["score"],
-    q=3,
-    labels=["SELL", "HOLD", "STRONG BUY"]
-)
-
-# rank
-df["rank"] = df["score"].rank(ascending=False)
-
-# =========================
-# OUTPUT
-# =========================
-print(df[[
-    "symbol",
-    "score",
-    "rank",
-    "signal",
-    "price",
-    "pe",
-    "roe",
-    "growth",
-    "debt",
-    "correction",
-    "ath_date",
-    "atl_date"
-]])
+st.write("Total Stocks:", len(df))
+st.write("Strong Buy:", len(df[df["Decision"] == "STRONG BUY"]))
+st.write("Buy:", len(df[df["Decision"] == "BUY"]))
+st.write("Sell:", len(df[df["Decision"] == "SELL"]))
